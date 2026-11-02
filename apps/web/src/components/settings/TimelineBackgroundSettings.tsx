@@ -5,9 +5,29 @@ import {
   useClientSettings,
   useUpdatePrimarySettings,
 } from "../../hooks/useSettings";
-import { compressImageForStash } from "../../lib/imageCompression";
+import {
+  compressImageToByteLimit,
+  MAX_STASH_IMAGE_DATA_URL_CHARS,
+  readFileAsDataUrl,
+} from "../../lib/imageCompression";
 import { Button } from "../ui/button";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
+
+// Base64 stores 3 bytes in every 4 characters.
+const MAX_WALLPAPER_BYTES = Math.floor(MAX_STASH_IMAGE_DATA_URL_CHARS / 4) * 3;
+
+/** Fits the image to the attachment edge and budget, and rejects data that cannot render. */
+async function prepareWallpaper(file: File): Promise<string> {
+  const result = await compressImageToByteLimit(file, MAX_WALLPAPER_BYTES);
+  if (!result.ok) throw new Error("Choose a readable image no larger than 50 MB.");
+  const dataUrl = await readFileAsDataUrl(result.file);
+  const decoded = new Image();
+  decoded.src = dataUrl;
+  await decoded.decode().catch(() => {
+    throw new Error("Choose a readable image no larger than 50 MB.");
+  });
+  return dataUrl;
+}
 
 export function TimelineBackgroundSettings() {
   const image = useClientSettings((settings) => settings.timelineBackgroundImage);
@@ -17,15 +37,29 @@ export function TimelineBackgroundSettings() {
   const fileInput = useRef<HTMLInputElement>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // Settings writes serialize the whole image, so a drag only persists once it settles.
+  const [opacityDraft, setOpacityDraft] = useState<number | null>(null);
+  const [blurDraft, setBlurDraft] = useState<number | null>(null);
+  const shownOpacity = opacityDraft ?? opacity;
+  const shownBlur = blurDraft ?? blur;
+  function settleOpacity() {
+    if (opacityDraft === null) return;
+    updateSettings({ timelineBackgroundOpacity: opacityDraft });
+    setOpacityDraft(null);
+  }
+  function settleBlur() {
+    if (blurDraft === null) return;
+    updateSettings({ timelineBackgroundBlur: blurDraft });
+    setBlurDraft(null);
+  }
   async function upload(file: File) {
     setBusy(true);
     setError("");
     try {
-      const result = await compressImageForStash(file);
-      if (!result.ok) throw new Error("Choose a readable image no larger than 50 MB.");
+      const timelineBackgroundImage = await prepareWallpaper(file);
       await persistClientSettingsUpdate((settings) => ({
         ...settings,
-        timelineBackgroundImage: result.image.dataUrl,
+        timelineBackgroundImage,
       }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save wallpaper.");
@@ -79,6 +113,10 @@ export function TimelineBackgroundSettings() {
             src={image}
             alt="Current wallpaper"
             className="max-h-48 w-full rounded-lg object-cover"
+            style={{
+              opacity: shownOpacity / 100,
+              filter: shownBlur > 0 ? `blur(${shownBlur}px)` : undefined,
+            }}
           />
           <SettingsRow
             title="Opacity"
@@ -89,10 +127,11 @@ export function TimelineBackgroundSettings() {
                 type="range"
                 min={0}
                 max={100}
-                value={opacity}
-                onChange={(event) =>
-                  updateSettings({ timelineBackgroundOpacity: Number(event.currentTarget.value) })
-                }
+                value={shownOpacity}
+                onChange={(event) => setOpacityDraft(Number(event.currentTarget.value))}
+                onPointerUp={settleOpacity}
+                onKeyUp={settleOpacity}
+                onBlur={settleOpacity}
               />
             }
           />
@@ -105,10 +144,11 @@ export function TimelineBackgroundSettings() {
                 type="range"
                 min={0}
                 max={30}
-                value={blur}
-                onChange={(event) =>
-                  updateSettings({ timelineBackgroundBlur: Number(event.currentTarget.value) })
-                }
+                value={shownBlur}
+                onChange={(event) => setBlurDraft(Number(event.currentTarget.value))}
+                onPointerUp={settleBlur}
+                onKeyUp={settleBlur}
+                onBlur={settleBlur}
               />
             }
           />
